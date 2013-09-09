@@ -158,7 +158,7 @@ class FakeProcess( FakeEntity ):
             self.registerVariableReference(
                 variableReferenceTuple[ 0 ],
                 variableReferenceTuple[ 1 ],
-                len( variableReferenceTuple ) > 2 and variableReferenceTuple[ 2 ] or 0,
+                len( variableReferenceTuple ) > 2 and int( variableReferenceTuple[ 2 ] ) or 0,
                 len( variableReferenceTuple ) > 3 and bool( variableReferenceTuple[ 3 ] )
                 )
 
