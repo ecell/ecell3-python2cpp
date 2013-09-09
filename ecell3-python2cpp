@@ -459,11 +459,50 @@ class FakeSimulator( object ):
         rootSystem.superSystem = rootSystem
         self._rootSystem = rootSystem
 
+class EntityIDEncoder( object ):
+    PREFIXES = {
+        SYSTEM: 's',
+        PROCESS: 'p',
+        VARIABLE: 'v'
+        }
+
+    def __init__( self ):
+        self.variableNameMap = {}
+        self.reverseMap = {}
+
+    def populate( self, fullIds ):
+        for fullId in fullIds:
+            entityTypeValue, systemPath, localId = createFullID( fullId )
+            preferredName = ( systemPath + localId ).replace( '/', '_' ).lstrip( '_' ) or 'root'
+            prevEntity = self.variableNameMap.get( preferredName )
+            if prevEntity is not None:
+                self.variableNameMap[ preferredName ] = True
+                if prevEntity is not True:
+                    newNameForPrevEntity = self.PREFIXES[ prevEntity[ 0 ] ] + '_' + preferredName
+                    self.variableNameMap[ newNameForPrevEntity ] = prevEntity
+                    self.reverseMap[ prevEntity[ 1 ] ] = newNameForPrevEntity
+                preferredName = self.PREFIXES[ entityTypeValue ] + '_' + preferredName
+            self.variableNameMap[ preferredName ] = ( entityTypeValue, fullId )
+            self.reverseMap[ fullId ] = preferredName
+
+    def __call__( self, aFullId ):
+        retval = self.reverseMap.get( aFullId )
+        if retval is None:
+            entityTypeValue, systemPath, localId = createFullID( fullId )
+            preferredName = ( systemPath + localId ).replace( '/', '_' ).lstrip( '_' ) or 'root'
+            prevEntity = self.variableNameMap.get( preferredName )
+            if prevEntity is not None:
+                preferredName = self.PREFIXES[ entityTypeValue ] + '_' + preferredName
+            self.variableNameMap[ preferredName ] = ( entityTypeValue, fullId )
+            retval = self.reverseMap[ fullId ] = preferredName
+        return retval
+
 class CppCodeEmitter( object ):
     def __init__( self ):
         self.modelVariable = 'model'
         self.lines = []
         self.p = ''
+        self.entityIDEncoder = EntityIDEncoder()
 
     def append( self, line='' ):
         self.lines.append( self.p + line )
@@ -503,7 +542,7 @@ class CppCodeEmitter( object ):
         return 'stepper_%s' % aStepperID
 
     def encodeEntityID( self, aFullID ):
-        return aFullID.replace(':', '_').replace('/', '_')
+        return self.entityIDEncoder( aFullID )
 
     def emitStepper( self, stepper ):
         encodedStepperId = self.encodeStepperID( stepper.id )
@@ -601,6 +640,15 @@ class CppCodeEmitter( object ):
         self.append( '#include <iostream>' )
 
     def emitEventLoop( self, simulator ):
+        self.append( "{" )
+        self.indent()
+        for entity in simulator.entities:
+            if entity.EntityType != 'Variable':
+                continue
+            self.append( 'libecs::Variable* const %s = reinterpret_cast<libecs::Variable*>(%s.getEntity(libecs::FullID(%s)));' % (
+                self.encodeEntityID( entity.FullID ),
+                self.modelVariable,
+                self.valueAsString( entity.FullID ) ) )
         self.append( "for (int i = 0; i < 10; ++i)" )
         self.append( "{" )
         self.indent()
@@ -614,14 +662,26 @@ class CppCodeEmitter( object ):
         self.append( "%s.step();" % self.modelVariable )
         self.dedent()
         self.append( "}" )
+        self.dedent()
+        self.append( "}" )
+
+    def emitBuildModel( self, simulator ):
+        self.entityIDEncoder.populate( entity.FullID for entity in simulator.entities )
+        self.append( 'void buildModel(libecs::Model& %s)' % self.modelVariable )
+        self.append( "{" )
+        self.indent()
+        self.emitSteppers( simulator.steppers.values() )
+        self.emitSystem( simulator.rootSystem )
+        self.dedent()
+        self.append( "}" )
 
     def emitMain( self, simulator ):
         self.append( 'int main()' )
-        self.append( '{' )
+        self.append( "{" )
         self.indent()
         self.append( 'typedef ModuleMaker<libecs::EcsObject> PropertiedObjectMaker;' )
         self.append( 'struct RAII' )
-        self.append( '{' )
+        self.append( "{" )
         self.indent()
         self.append( 'RAII() { libecs::initialize(); }' )
         self.append( '~RAII() { libecs::finalize(); }' )
@@ -643,8 +703,7 @@ class CppCodeEmitter( object ):
         self.append( '%s.setup();' % self.modelVariable )
         self.append()
         self.append( "// build the model" )
-        self.emitSteppers( simulator.steppers.values() )
-        self.emitSystem( simulator.rootSystem )
+        self.append( "buildModel(%s);" % self.modelVariable)
         self.append()
         self.append( "// initialize the simulation state" )
         self.append( "%s.initialize();" % self.modelVariable )
@@ -652,10 +711,12 @@ class CppCodeEmitter( object ):
         self.append( "// advance the simulation" )
         self.emitEventLoop( simulator )
         self.dedent()
-        self.append( '}' )
+        self.append( "}" )
 
     def __call__( self, simulator ):
         self.emitIncludes()
+        self.append()
+        self.emitBuildModel( simulator )
         self.append()
         self.emitMain( simulator )
 
