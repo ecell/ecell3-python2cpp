@@ -598,6 +598,7 @@ class CppCodeEmitter( object ):
         self.append( '#include <libecs/Process.hpp>' )
         self.append( '#include <libecs/Variable.hpp>' )
         self.append( '#include <libecs/Stepper.hpp>' )
+        self.append( '#include <iostream>' )
 
     def emitEventLoop( self, simulator ):
         self.append( "for (int i = 0; i < 10; ++i)" )
