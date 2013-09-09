@@ -1,0 +1,718 @@
+#!/usr/bin/env python
+#::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#
+#       This file is part of the E-Cell System
+#
+#       Copyright (C) 1996-2013 Keio University
+#       Copyright (C) 2005-2009 The Molecular Sciences Institute
+#
+#::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#
+#
+# E-Cell System is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public
+# License as published by the Free Software Foundation; either
+# version 2 of the License, or (at your option) any later version.
+# 
+# E-Cell System is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See the GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public
+# License along with E-Cell System -- see the file COPYING.
+# If not, write to the Free Software Foundation, Inc.,
+# 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+# 
+#END_HEADER
+
+import os
+import sys
+import getopt
+from ecell.eml import Eml
+from ecell.ecssupport import createFullID, createFullPN, convertFullPNToFullID
+from ecell.ecs_constants import SYSTEM, PROCESS, VARIABLE
+
+def usage():
+    aProgramName = os.path.basename( sys.argv[0] )
+    print \
+    '''%(appname)s -- convert a Python script file to C++ script.
+
+Usage:
+    %(appname)s [-h] [-o SCRIPT] infile.py
+    By default this command automatically overwrite EMLFILE.
+
+Options:
+    -h or --help            : Print this message.
+    -o or --outfile=CXX     : Specify the output file name. '-' means stdout.
+''' % { 'appname': aProgramName }
+
+
+class FakeEcsObject( object ):
+    _excluded_names = []
+
+    def getPropertyList( self ):
+        return [
+            attrName
+            for attrName in dir( self )
+            if attrName[ 0 ] in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' and attrName not in self._excluded_names
+            ]
+
+class FakeStepper( FakeEcsObject ):
+    def __init__( self, className, id ):
+        self.className = className
+        self.id = id
+        self.Priority = None
+        self.StepInterval = None
+        self.MaxStepInterval = None
+        self.MinStepInterval = None
+        self.RngSeed = None
+
+class FakeEntity( FakeEcsObject ):
+    _excluded_names = [ 'EntityType', 'FullID' ]
+
+    EntityType = None
+
+    def __init__( self, className, model, id ):
+        self.className = className
+        self.model = model
+        self.ID = id
+        self.Name = None
+        self.superSystem = None
+
+    def getSuperSystem( self ):
+        return self.superSystem
+
+    @property
+    def systemPath( self ):
+        if self.superSystem is self:
+            return ''
+        retval = self.superSystem.systemPath + '/'
+        if self.superSystem.ID != '/':
+            retval += self.superSystem.ID
+        return retval
+
+    @property
+    def FullID( self ):
+        return '%s:%s:%s' % (self.EntityType, self.systemPath, self.ID)
+
+    def detach( self ):
+        if self.superSystem is not None:
+            self.superSystem.unregisterEntity( self )
+            self.superSystem = None
+
+    def getPropertyList( self ):
+        return [
+            attrName
+            for attrName in dir( self )
+            if attrName[ 0 ] in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' and attrName not in self._excluded_names
+            ]
+
+    def prepreinitialize( self ):
+        pass
+
+    def preinitialize( self ):
+        pass
+
+    def initialize( self ):
+        pass
+
+class VariableReference( object ):
+    ELLIPSIS_PREFIX = '___'
+    DEFAULT_NAME = '_'
+
+    def __init__( self, serial, name=None, fullIdOrVariable=None, coefficient=0, accessor=False ):
+        if isinstance( fullIdOrVariable, FakeVariable ):
+            variable = fullIdOrVariable
+            fullId = None
+        else:
+            variable = None
+            fullId = fullIdOrVariable
+        self.Serial = serial
+        self.Name = name
+        self.FullID = fullId
+        self.Variable = variable
+        self.Coefficient = coefficient
+        self.Accessor = accessor
+
+class FakeProcess( FakeEntity ):
+    EntityType = 'Process'
+    def __init__( self, className, model, id=None ):
+        super( FakeProcess, self ).__init__( className, model, id )
+        self.variableReferences = []
+        self.nextSerial = 1
+
+    def getVariableReferenceList( self ):
+        return [
+            (
+                variableReference.Name,
+                variableReference.FullID,
+                variableReference.Coefficient,
+                variableReference.Accessor
+                )
+            for variableReference in self.variableReferences
+            ]
+
+    def setVariableReferenceList( self, value ):
+        for variableReferenceTuple in value:
+            self.registerVariableReference(
+                variableReferenceTuple[ 0 ],
+                variableReferenceTuple[ 1 ],
+                len( variableReferenceTuple ) > 2 and variableReferenceTuple[ 2 ] or 0,
+                len( variableReferenceTuple ) > 3 and bool( variableReferenceTuple[ 3 ] )
+                )
+
+    VariableReferenceList = property( getVariableReferenceList, setVariableReferenceList )
+
+    def registerVariableReference( self, name, fullIdOrVariable, coefficient, accessor ):
+        self.variableReferences.append(
+            VariableReference( self.nextSerial, name, fullIdOrVariable, coefficient, accessor )
+            )
+        self.nextSerial += 1
+
+    def resolveVariableReferences( self ):
+        assert self.superSystem
+        assert self.model
+        ellipsisNumber = 0
+        for variableReference in self.variableReferences:
+            if variableReference.Name == VariableReference.DEFAULT_NAME:
+                variableReference.Name = '%s%03d' % ( VariableReference.ELLIPSIS_PREFIX, ellipsisNumber )
+                ellipsisNumber += 1
+            if variableReference.Variable is None:
+                fullIdTuple = createFullID( variableReference.FullID )
+                containerSystem = self.superSystem.getSystem( fullIdTuple[ 1 ] )
+                variable = containerSystem.getVariable( fullIdTuple[ 2 ] )
+                variableReference.Variable = variable 
+            else:
+                variableReference.FullID = variableReference.Variable.FullID
+
+    def preinitialize( self ):
+        self.resolveVariableReferences()
+
+class FakeSystem( FakeEntity ):
+    EntityType = 'System'
+    def __init__( self, className, model, id=None ):
+        super( FakeSystem, self ).__init__( className, model, id )
+        self.variables = {}
+        self.processes = {}
+        self.systems = {}
+        self.entities = {
+            'Variable': self.variables,
+            'Process': self.processes,
+            'System': self.systems
+            }
+        self.StepperID = ''
+
+    def registerEntity( self, entity ):
+        slot = self.entities.get( entity.EntityType )
+        if slot is None:
+            raise NotImplementedError
+        entity.superSystem = self
+        slot[ entity.ID ] = entity
+
+    def unregisterEntity( self, entity ):
+        assert entity.superSystem == self
+        slot = self.entities.get( entity.EntityType )
+        del slot[ entity.ID ]
+        entity.superSystem = None
+
+    def getSystem( self, systemPath ):
+        if systemPath.startswith( '/' ):
+            return self.model.getSystem( systemPath )
+        elif '/' in systemPath:
+            retval = self
+            for c in systemPath.split('/'):
+                retval = retval.getSystem( c )
+            return retval
+        else:
+            if systemPath == '' and self.superSystem == self:
+                return self
+            else:
+                return self.systems[ systemPath ]
+
+    def getVaraible( self, localId ):
+        return self.variables[ localId ] 
+
+    def getProcess( self, localId ):
+        return self.processes[ localId ] 
+
+class FakeVariable( FakeEntity ):
+    EntityType = 'Variable'
+    def __init__( self, className, model, id=None ):
+        super( FakeVariable, self ).__init__( className, model, id )
+
+class FakeSimulator( object ):
+    DM_SEARCH_PATH_SEPARATOR = ''
+
+    @property
+    def rootSystem( self ):
+        return self._rootSystem
+
+    def getClassInfo( self, classname ):
+        pass
+
+    def createStepper( self, classname, stepperId ):
+        retval = FakeStepper( classname, stepperId )
+        self.steppers[ stepperId ] = retval
+        return retval
+
+    def getStepper( self, stepperId ):
+        return self.steppers[ stepperId ]
+
+    def deleteStepper( self, stepperId ):
+        del self.steppers[ stepperId ]
+
+    def getStepperList( self ):
+        return self.steppers.keys()
+
+    def getStepperPropertyList( self, stepperId ):
+        pass
+
+    def getStepperPropertyAttributes( self, stepperId, propertyName ):
+        pass
+
+    def setStepperProperty( self, stepperId, propertyName, value ):
+        pass
+
+    def getStepperProperty( self, stepperId, propertyName ):
+        pass
+
+    def loadStepperProperty( self, stepperId, propertyName, value ):
+        pass
+
+    def saveStepperProperty( self, stepperId, propertyName ):
+        pass
+
+    def getStepperClassName( self, stepperId ):
+        pass
+
+    def getSystem( self, systemPath ):
+        return self.rootSystem.getSystem( systemPath.lstrip( '/' ) )
+
+    def createEntity( self, className, fullId ):
+        aFullIdTuple = createFullID( fullId )
+        aContainerSystem = self.getSystem( aFullIdTuple[ 1 ] )
+        retval = None
+        if aFullIdTuple[ 0 ] == SYSTEM:
+            retval = self.createSystem( className )
+            retval.ID = aFullIdTuple[ 2 ]
+            aContainerSystem.registerEntity( retval )
+        elif aFullIdTuple[ 0 ] == PROCESS:
+            retval = self.createProcess( className )
+            retval.ID = aFullIdTuple[ 2 ]
+            aContainerSystem.registerEntity( retval )
+        elif aFullIdTuple[ 0 ] == VARIABLE:
+            retval = self.createVariable( className )
+            retval.ID = aFullIdTuple[ 2 ]
+            aContainerSystem.registerEntity( retval )
+        else:
+            raise NotImplementedError
+        return retval
+
+    def createVariable( self, className ):
+        retval = FakeVariable( className, self )
+        self.entities.append( retval )
+        return retval
+
+    def createProcess( self, className ):
+        retval = FakeProcess( className, self )
+        self.entities.append( retval )
+        return retval
+
+    def createSystem( self, className ):
+        retval = FakeSystem( className, self )
+        self.entities.append( retval )
+        return retval
+
+    def getEntity( self, fullId ):
+        entityType, systemPath, localId = createFullID( fullId )
+        if systemPath == '':
+            if entityType == SYSTEM and localId == '/':
+                return self._rootSystem
+            else:
+                raise Exception( '%s is an invalid FullID' % fullId )
+        else:
+            aContainerSystem = self.getSystem( systemPath ) 
+            if entityType == VARIABLE:
+                return aContainerSystem.getVaraible( localId )
+            elif entityType == PROCESS:
+                return aContainerSystem.getProcess( localId )
+            elif entityType == SYSTEM:
+                return aContainerSystem.getSystem( localId )
+            else:
+                raise NotImplementedError
+
+    def deleteEntity( self, fullId ):
+        return self.getEntity( fullId ).detach()
+
+    def getEntityList( self, entityType, systemPath ):
+        aContainerSystem = self.getSystem( systemPath )
+        return aContainerSystem.slot[ entityType ].values()
+
+    def entityExists( self, fullID ):
+        try:
+            self.getEntity( fullID )
+            return True
+        except:
+            pass
+        return False
+
+    def getEntityPropertyList( self, fullID ):
+        entity = self.getEntity( fullID )
+        return entity.getPropertyList()
+
+    def setEntityProperty( self, fullPN, value ):
+        fullId, propertyName = convertFullPNToFullID( createFullPN( fullPN ) )
+        setattr( self.getEntity( fullId ), propertyName, value )
+
+    def getEntityProperty( self, fullPN ):
+        fullId, propertyName = convertFullPNToFullID( createFullPN( fullPN ) )
+        return getattr( self.getEntity( fullId ), propertyName )
+
+    def loadEntityProperty( self, fullPN, value ):
+        return self.setEntityProperty( fullPN, value )
+
+    def saveEntityProperty( self, fullPN ):
+        return self.getEntityProperty( fullPN )
+
+    def getEntityPropertyAttributes( self, fullPN ):
+        return {}
+
+    def getEntityClassName( self, fullID ):
+        return self.getEntity( fullID ).className
+
+    def getLoggerList( self ):
+        pass
+
+    def createLogger( self, fullPN, params=None ):
+        pass
+
+    def getLogger( self, fullPN ):
+        pass
+
+    def getLoggerData( self, fullPN, startTime=None, endTime=None, interval=None ):
+        pass
+
+    def getLoggerStartTime( self, fullPN ):
+        pass
+
+    def getLoggerEndTime( self, fullPN ):
+        pass
+
+    def getLoggerPolicy( self, fullPN ):
+        pass
+
+    def setLoggerPolicy( self, fullPN, params ):
+        pass
+
+    def getLoggerSize( self, fullPN ):
+        pass
+
+    def getCurrentTime( self ):
+        pass
+
+    def getNextEvent( self ):
+        pass
+
+    def getPropertyInfo( self, className ):
+        pass
+
+    def getDMInfo( self ):
+        pass
+
+    def markDirty( self ):
+        pass
+
+    def step( self, nSteps = None ):
+        pass
+
+    def run( self, nSecs = None ):
+        pass
+
+    def preinitializeEntities( self, system ):
+        system.preinitialize()
+        for variable in system.variables.values():
+            variable.preinitialize()
+        for process in system.processes.values():
+            process.preinitialize()
+        for system in system.systems.values():
+            self.preinitializeEntities( system )
+
+    def initializeEntities( self, system ):
+        system.initialize()
+        for variable in system.variables.values():
+            variable.initialize()
+        for process in system.processes.values():
+            process.initialize()
+        for system in system.systems.values():
+            self.initializeEntities( system )
+
+    def initialize( self ):
+        self.preinitializeEntities( self._rootSystem )
+        self.initializeEntities( self._rootSystem )
+
+    def __init__( self ):
+        self.steppers = {}
+        self.entities = []
+        rootSystem = self.createSystem( 'System' )
+        rootSystem.ID = '/'
+        rootSystem.superSystem = rootSystem
+        self._rootSystem = rootSystem
+
+class CppCodeEmitter( object ):
+    def __init__( self ):
+        self.modelVariable = 'model'
+        self.lines = []
+        self.p = ''
+
+    def append( self, line='' ):
+        self.lines.append( self.p + line )
+
+    def indent( self ):
+        self.p += '    '
+
+    def dedent( self ):
+        self.p = self.p[ : -4 ]
+
+    def stringLiteral( self, value ):
+        return '"' + value.replace( '\\', '\\\\' ).replace( '"', '\\"' ) + '"'
+
+    def valueAsString( self, value ):
+        if isinstance( value, basestring ):
+            return self.stringLiteral( value )
+        elif isinstance( value, bool ):
+            return value and 'true' or 'false'
+        elif isinstance( value, int ) or isinstance( value, float ):
+            return str( value )
+        raise NotImplementedError
+
+    def valueAsPolymorph( self, value ):
+        if isinstance( value, basestring ):
+            return 'libecs::Polymorph(%s)' % self.stringLiteral( value )
+        elif isinstance( value, bool ):
+            return self.valueAsPolymorph( value and 1 or 0 )
+        elif isinstance( value, int ):
+            return 'libecs::Polymorph(static_cast<libecs::Integer>(%s))' % str( value )
+        elif isinstance( value, float ):
+            return 'libecs::Polymorph(static_cast<libecs::Real>(%s))' % str( value )
+        elif isinstance( value, list ) or isinstance( value, tuple ):
+            return 'libecs::Polymorph(boost::make_tuple(%s))' % ', '.join( self.valueAsPolymorph( item ) for item in value )
+        raise NotImplementedError
+ 
+    def encodeStepperID( self, aStepperID ):
+        return 'stepper_%s' % aStepperID
+
+    def encodeEntityID( self, aFullID ):
+        return aFullID.replace(':', '_').replace('/', '_')
+
+    def emitStepper( self, stepper ):
+        encodedStepperId = self.encodeStepperID( stepper.id )
+        self.append( 'libecs::Stepper* %s = %s.createStepper(%s, %s);' % (
+                encodedStepperId,
+                self.modelVariable,
+                self.valueAsString( stepper.className ),
+                self.valueAsString( stepper.id ) ) )
+        self.append( "{" )
+        self.indent()
+        self.emitLoadProperties( encodedStepperId, stepper )
+        self.dedent()
+        self.append( "}" )
+
+    def emitSteppers( self, steppers ):
+        for stepper in steppers:
+            self.emitStepper( stepper )
+
+    def emitLoadProperties( self, encodedEntityId, ecsObject, excluded=[] ):
+        for property in ecsObject.getPropertyList():
+            if property in excluded:
+                continue
+            value = getattr( ecsObject, property )
+            if value is not None:
+                self.append( '%s->loadProperty(%s, %s);' % ( encodedEntityId, self.valueAsString( property ), self.valueAsPolymorph( value ) ) )
+
+    def emitSystem( self, system ):
+        encodedEntityId = self.encodeEntityID( system.FullID )
+        if system.systemPath == '':
+            self.append( 'libecs::System* %s = %s.getRootSystem();' % (
+                    encodedEntityId,
+                    self.modelVariable ) )
+            excluded = [ 'ID' ]
+        else:
+            self.append( 'libecs::System* %s = reinterpret_cast<libecs::System*>(%s.createEntity(%s, libecs::FullID(%s)));' % (
+                    encodedEntityId,
+                    self.modelVariable,
+                    self.valueAsString( system.className ),
+                    self.valueAsString( system.FullID ) ) )
+            excluded = []
+        self.append( "{" )
+        self.indent()
+        self.emitLoadProperties( encodedEntityId, system, excluded )
+        self.dedent()
+        self.append( "}" )
+        for variable in system.variables.values():
+            self.emitVariable( variable )
+        for process in system.processes.values():
+            self.emitProcess( process )
+        for subsystem in system.systems.values():
+            self.emitSystem( subsystem )
+
+    def emitVariable( self, variable ):
+        encodedEntityId = self.encodeEntityID( variable.FullID )
+        self.append( 'libecs::Variable* %s = reinterpret_cast<libecs::Variable*>(%s.createEntity(%s, libecs::FullID(%s)));' % (
+                encodedEntityId,
+                self.modelVariable,
+                self.valueAsString( variable.className ),
+                self.valueAsString( variable.FullID ) ) )
+        self.append( "{" )
+        self.indent()
+        self.emitLoadProperties( encodedEntityId, variable, [ 'ID' ] )
+        self.dedent()
+        self.append( "}" )
+
+    def emitProcess( self, process ):
+        encodedEntityId = self.encodeEntityID( process.FullID )
+        self.append( 'libecs::Process* %s = reinterpret_cast<libecs::Process*>(%s.createEntity(%s, libecs::FullID(%s)));' % (
+                encodedEntityId,
+                self.modelVariable,
+                self.valueAsString( process.className ),
+                self.valueAsString( process.FullID ) ) )
+        self.append( "{" )
+        self.indent()
+        self.emitLoadProperties( encodedEntityId, process, [ 'ID', 'VariableReferenceList' ] )
+        for variableReference in process.variableReferences:
+            self.append( '%s->registerVariableReference(%s, libecs::FullID(%s), %s, %s);' % (
+                encodedEntityId,
+                self.valueAsString( variableReference.Name ),
+                self.valueAsString( variableReference.FullID ),
+                self.valueAsString( variableReference.Coefficient ),
+                self.valueAsString( variableReference.Accessor )
+                ) )
+        self.dedent()
+        self.append( "}" )
+
+    def emitIncludes( self ):
+        self.append( '#include <boost/scoped_ptr.hpp>' )
+        self.append( '#include <libecs/libecs.hpp>' )
+        self.append( '#include <libecs/Model.hpp>' )
+        self.append( '#include <libecs/System.hpp>' )
+        self.append( '#include <libecs/Process.hpp>' )
+        self.append( '#include <libecs/Variable.hpp>' )
+        self.append( '#include <libecs/Stepper.hpp>' )
+
+    def emitEventLoop( self, simulator ):
+        self.append( "for (int i = 0; i < 10; ++i)" )
+        self.append( "{" )
+        self.indent()
+        self.append( 'std::cout << "<<time: " << %s.getCurrentTime() << ">>" << std::endl;' % self.modelVariable )
+        for entity in simulator.entities:
+            if entity.EntityType != 'Variable':
+                continue
+            self.append( 'std::cout << %s << "=" << %s->getValue() << std::endl;' % (
+                self.valueAsString( entity.FullID ),
+                self.encodeEntityID( entity.FullID ) ) )
+        self.append( "%s.step();" % self.modelVariable )
+        self.dedent()
+        self.append( "}" )
+
+    def emitMain( self, simulator ):
+        self.append( 'int main()' )
+        self.append( '{' )
+        self.indent()
+        self.append( 'typedef ModuleMaker<libecs::EcsObject> PropertiedObjectMaker;' )
+        self.append( 'struct RAII' )
+        self.append( '{' )
+        self.indent()
+        self.append( 'RAII() { libecs::initialize(); }' )
+        self.append( '~RAII() { libecs::finalize(); }' )
+        self.dedent()
+        self.append( '} _;' )
+        self.append( 'boost::scoped_ptr<PropertiedObjectMaker> propertiedObjectMaker(libecs::createDefaultModuleMaker());' )
+        self.append( 'libecs::Model %s(*propertiedObjectMaker);' % self.modelVariable )
+        self.append()
+        self.append( "// initialize the model" )
+        self.append( "{" )
+        self.indent()
+        self.append( 'const char* dmpath = getenv("ECELL3_DM_PATH");' )
+        self.append( 'if ( dmpath )' )
+        self.indent()
+        self.append( '%s.setDMSearchPath(dmpath);' % self.modelVariable )
+        self.dedent()
+        self.dedent()
+        self.append( "}" )
+        self.append( '%s.setup();' % self.modelVariable )
+        self.append()
+        self.append( "// build the model" )
+        self.emitSteppers( simulator.steppers.values() )
+        self.emitSystem( simulator.rootSystem )
+        self.append()
+        self.append( "// initialize the simulation state" )
+        self.append( "%s.initialize();" % self.modelVariable )
+        self.append()
+        self.append( "// advance the simulation" )
+        self.emitEventLoop( simulator )
+        self.dedent()
+        self.append( '}' )
+
+    def __call__( self, simulator ):
+        self.emitIncludes()
+        self.append()
+        self.emitMain( simulator )
+
+def main():
+    try:
+        opts, args = getopt.getopt( sys.argv[1:] , 'DEho:',
+                         ['help', 'debug', 'outfile='])
+    except:
+        usage()
+        sys.exit( 255 )
+
+    aCXXFileName = None
+    aForceFlag = 1 # Default Automatic overwrite mode
+    aPatchFlag = 0
+    debug = 0
+    for anOption, anArg in opts:
+        if anOption in ( "-h", '--help' ):
+            usage()
+            sys.exit( 0 )
+            
+        if anOption in ( "-D", '--debug' ):
+            debug = 1
+            
+        if anOption in ( "-o", '--outfile'):
+            aCXXFileName = anArg
+            
+    if len( args ) == 0:
+        sys.stderr.write( "No input file.\n" )
+        sys.exit( 1 )
+
+    aScriptName = args[0]
+
+    if aCXXFileName is None:
+        name, _ = os.path.splitext( aScriptName )
+        aCXXFileName = name + '.cpp'
+
+    aFakeSimulator = FakeSimulator()
+
+    def step( nSteps=None ):
+        aFakeSimulator.step( nSteps )
+
+    def run( nSecs=None ):
+        aFakeSimulator.run( nSecs )
+
+    exec open( aScriptName ) in { 'theSimulator': aFakeSimulator, 'run': run, 'step': step }
+
+    emitter = CppCodeEmitter()
+    emitter( aFakeSimulator )
+    if aCXXFileName == '-':
+        out = sys.stdout
+    else:
+        out = open( aCXXFileName, 'w' )
+    try:
+        out.write( '\n'.join( emitter.lines ) )
+    finally:
+        out.close()
+
+if __name__ == '__main__':
+    main()
+    sys.exit( 0 )
+
