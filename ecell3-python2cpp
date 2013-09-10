@@ -575,17 +575,15 @@ class CppCodeEmitter( object ):
             self.append( 'libecs::System* %s = %s.getRootSystem();' % (
                     encodedEntityId,
                     self.modelVariable ) )
-            excluded = [ 'ID' ]
         else:
             self.append( 'libecs::System* %s = dynamic_cast<libecs::System*>(%s.createEntity(%s, libecs::FullID(%s)));' % (
                     encodedEntityId,
                     self.modelVariable,
                     self.valueAsString( system.className ),
                     self.valueAsString( system.FullID ) ) )
-            excluded = []
         self.append( "{" )
         self.indent()
-        self.emitLoadProperties( encodedEntityId, system, excluded )
+        self.emitLoadProperties( encodedEntityId, system, [ 'ID' ] )
         self.dedent()
         self.append( "}" )
         for variable in system.variables.values():
