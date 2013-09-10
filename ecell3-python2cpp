@@ -577,7 +577,7 @@ class CppCodeEmitter( object ):
                     self.modelVariable ) )
             excluded = [ 'ID' ]
         else:
-            self.append( 'libecs::System* %s = reinterpret_cast<libecs::System*>(%s.createEntity(%s, libecs::FullID(%s)));' % (
+            self.append( 'libecs::System* %s = dynamic_cast<libecs::System*>(%s.createEntity(%s, libecs::FullID(%s)));' % (
                     encodedEntityId,
                     self.modelVariable,
                     self.valueAsString( system.className ),
@@ -597,7 +597,7 @@ class CppCodeEmitter( object ):
 
     def emitVariable( self, variable ):
         encodedEntityId = self.encodeEntityID( variable.FullID )
-        self.append( 'libecs::Variable* %s = reinterpret_cast<libecs::Variable*>(%s.createEntity(%s, libecs::FullID(%s)));' % (
+        self.append( 'libecs::Variable* %s = dynamic_cast<libecs::Variable*>(%s.createEntity(%s, libecs::FullID(%s)));' % (
                 encodedEntityId,
                 self.modelVariable,
                 self.valueAsString( variable.className ),
@@ -610,7 +610,7 @@ class CppCodeEmitter( object ):
 
     def emitProcess( self, process ):
         encodedEntityId = self.encodeEntityID( process.FullID )
-        self.append( 'libecs::Process* %s = reinterpret_cast<libecs::Process*>(%s.createEntity(%s, libecs::FullID(%s)));' % (
+        self.append( 'libecs::Process* %s = dynamic_cast<libecs::Process*>(%s.createEntity(%s, libecs::FullID(%s)));' % (
                 encodedEntityId,
                 self.modelVariable,
                 self.valueAsString( process.className ),
@@ -645,7 +645,7 @@ class CppCodeEmitter( object ):
         for entity in simulator.entities:
             if entity.EntityType != 'Variable':
                 continue
-            self.append( 'libecs::Variable* const %s = reinterpret_cast<libecs::Variable*>(%s.getEntity(libecs::FullID(%s)));' % (
+            self.append( 'libecs::Variable* const %s = dynamic_cast<libecs::Variable*>(%s.getEntity(libecs::FullID(%s)));' % (
                 self.encodeEntityID( entity.FullID ),
                 self.modelVariable,
                 self.valueAsString( entity.FullID ) ) )
